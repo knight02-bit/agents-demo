@@ -1,9 +1,25 @@
 import os
 import subprocess
 from anthropic import Anthropic
+from langfuse import observe, get_client
 from dotenv import load_dotenv
 
 load_dotenv(override=True)
+
+# 全局初始化 client
+langfuse = get_client()
+try:
+    ok = langfuse.auth_check()
+except Exception as e:
+    ok = False
+    print(f"Langfuse auth_check failed: {e}")
+
+if ok:
+    print("Langfuse client is authenticated and ready!")
+else:
+    print("Langfuse authentication failed. Please set LANGFUSE_PUBLIC_KEY/LANGFUSE_SECRET_KEY and (optionally) LANGFUSE_HOST.")
+
+
 if os.getenv("ANTHROPIC_BASE_URL"):
     os.environ.pop("ANTHROPIC_AUTH_TOKEN", None)
 
@@ -94,32 +110,59 @@ def run_bash(command: str) -> str:
     except subprocess.TimeoutExpired:
         return "Error: Timeout (120s)"
 
+@observe()
 def agent_loop(messages: list):
+    langfuse.update_current_trace(
+        user_id="user_123",
+        session_id="session_abc",
+        tags=[MODEL], # 推荐用 tags 记录模型
+        version="1.0.0"
+    )
+
     max_loops = 15 # 安全限制，防止 LLM 卡住时无限循环
     loop_count = 0
     last_command = None # 跟踪上一个命令以检测重复循环
-    
+
     while loop_count < max_loops:
         loop_count += 1
-        with client.messages.stream(
-            model=MODEL, system=SYSTEM, messages=messages,
-            tools=TOOLS, max_tokens=8000
-        ) as stream:
-            # 遍历 text_stream，实现打字机效果的实时输出
-            # end="" 防止了每次打印都换行
-            # flush=True 会强制 Python 绕过系统缓冲区，立刻把接收到的字符推送到终端屏幕上
-            for text in stream.text_stream:
-                print(text, end="", flush=True)
 
-            print()
-            # 阻塞等待，直到获取完整的 Message 对象
-            response = stream.get_final_message()
+        # 🌟 为每次大模型调用创建一个独立的 Generation 节点
+        # 这会让 Langfuse 后台呈现极其清晰的瀑布流，并精准挂载 Token
+        with langfuse.start_as_current_observation(
+            name=f"llm-call-loop-{loop_count}",
+            as_type="generation",
+            model=MODEL,
+            input=messages # 可选：记录丢给大模型的当前完整上下文
+        ) as generation:
+            with client.messages.stream(
+                model=MODEL, system=SYSTEM, messages=messages,
+                tools=TOOLS, max_tokens=8000
+            ) as stream:
+                # 遍历 text_stream，实现打字机效果的实时输出
+                # end="" 防止了每次打印都换行
+                # flush=True 会强制 Python 绕过系统缓冲区，立刻把接收到的字符推送到终端屏幕上
+                for text in stream.text_stream:
+                    print(text, end="", flush=True)
 
+                print()
+                # 阻塞等待，直到获取完整的 Message 对象
+                response = stream.get_final_message()
+                print(f"Token 消耗: {response.usage}")
+
+        # 🌟 将当前请求的 Token 消耗和输出更新给当前的 Generation
+        if hasattr(response, 'usage') and response.usage:
+            generation.update(
+                model=MODEL,
+                usage={
+                    "input": response.usage.input_tokens,
+                    "output": response.usage.output_tokens
+                }
+            )
         messages.append({"role": "assistant", "content": response.content})
         # 如果不是工具调用，直接返回
-        if response.stop_reason != "tool_use": 
+        if response.stop_reason != "tool_use":
             return
-        
+
         results = []
         for block in response.content:
             if block.type == "tool_use":
@@ -131,34 +174,34 @@ def agent_loop(messages: list):
                     error_msg = "Error: Missing 'command' parameter in tool call."
                     print(f"\033[31m[System] {error_msg}\033[0m")
                     results.append({
-                        "type": "tool_result", 
+                        "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": error_msg
                     })
                     continue
 
                 print(f"\033[33m$ {cmd}\033[0m")
-                
+
                 # 如果 LLM 重试刚刚失败（或成功）的完全相同的命令，
                 # 它很可能陷入了循环。这里强制停止循环。
                 if cmd == last_command:
                     error_msg = "Error: Duplicate command detected. Task stopped by system safety guard."
                     print(f"\033[31m[System] {error_msg}\033[0m")
                     results.append({
-                        "type": "tool_result", 
+                        "type": "tool_result",
                         "tool_use_id": block.id,
                         "content": error_msg
                     })
                     messages.append({"role": "user", "content": results})
                     return
-                
+
                 output = run_bash(cmd)
                 last_command = cmd
-                
+
                 # 截断输出以避免长日志刷屏
                 display_out = output[:100].replace('\n', ' ') + "..." if len(output) > 100 else output
                 print(f"\033[90m{display_out}\033[0m")
-                
+
                 results.append({
                     "type": "tool_result",
                     "tool_use_id": block.id,
@@ -180,10 +223,7 @@ if __name__ == "__main__":
         
         history.append({"role": "user", "content": query})
         agent_loop(history)
-        # response_content = history[-1]["content"] # 提取助手的回复
-        # if isinstance(response_content, list): # 检查是否为列表
-        #     for block in response_content:
-        #         if hasattr(block, "text"):
-        #             print(block.text)
         print()
 
+    # Flush events before exit
+    langfuse.flush()
