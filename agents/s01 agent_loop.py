@@ -6,7 +6,7 @@ from dotenv import load_dotenv
 
 load_dotenv(override=True)
 
-# 全局初始化 client
+# 全局初始化 client, 并检查认证
 langfuse = get_client()
 try:
     ok = langfuse.auth_check()
@@ -38,6 +38,7 @@ COMMON_MODELS = [
 MODEL = os.getenv("MODEL_ID")
 
 def choose_model(current_model: str) -> str:
+    """选择模型"""
     print("\033[35m选择模型：\033[0m")
     for idx, name in enumerate(COMMON_MODELS, start=1):
         print(f"{idx}. {name}")
@@ -85,6 +86,7 @@ TOOLS = [{
     },
 }]
 
+
 def run_bash(command: str) -> str:
     dangerous = ["rm -rf /", "sudo", "shutdown", "reboot", "> /dev/"]
     if any(d in command for d in dangerous):
@@ -126,8 +128,8 @@ def agent_loop(messages: list):
     while loop_count < max_loops:
         loop_count += 1
 
-        # 🌟 为每次大模型调用创建一个独立的 Generation 节点
-        # 这会让 Langfuse 后台呈现极其清晰的瀑布流，并精准挂载 Token
+        # 为每次大模型调用创建一个独立的 Generation 节点
+        # 这会让 Langfuse 后台呈现极其清晰的瀑布流并精准挂载 Token
         with langfuse.start_as_current_observation(
             name=f"llm-call-loop-{loop_count}",
             as_type="generation",
@@ -152,7 +154,6 @@ def agent_loop(messages: list):
         # 🌟 将当前请求的 Token 消耗和输出更新给当前的 Generation
         if hasattr(response, 'usage') and response.usage:
             generation.update(
-                model=MODEL,
                 usage={
                     "input": response.usage.input_tokens,
                     "output": response.usage.output_tokens
