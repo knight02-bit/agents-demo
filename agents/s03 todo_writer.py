@@ -86,7 +86,7 @@ class TodoManager:
         
         validated = []
         in_progress_num = 0
-        for i, todo in enumerate(todos):
+        for i, todo in enumerate(todos): # 验证每个 todo 项
             text = str(todo.get("text", "")).strip()
             status = str(todo.get("status", "")).strip().lower()
             todo_id = str(todo.get("id", f"todo_{i}")).strip()
@@ -120,9 +120,14 @@ class TodoManager:
             status = todo["status"]
             marker = {"pending": "[ ]", "in_progress": "[>]", "completed": "[x]"}[status]
             color = colors[status]
-            lines.append(f"{color}{marker} - {todo['id']}: {todo['text']}{colors['reset']}")
+            lines.append(f"{color}{marker} - {todo['id']}: {todo['text']}{colors['reset']}\n")
         done = sum(1 for todo in self.todos if todo["status"] == "completed")
-        summary_color = colors["completed"] if done == len(self.todos) else colors["in_progress"] if done else colors["pending"]
+        if done == len(self.todos):
+            summary_color = colors["completed"]
+        elif done > 0:
+            summary_color = colors["in_progress"]
+        else:
+            summary_color = colors["pending"]
         lines.append(f"{summary_color}Done: {done}/{len(self.todos)}{colors['reset']}")
         return "\n".join(lines)
 
