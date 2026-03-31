@@ -386,7 +386,8 @@ def agent_loop(messages: list):
                 )
 
                 # 如果 LLM 重试刚刚失败（或成功）的完全相同的工具调用，很可能陷入了循环
-                if tool_call_sig == last_tool_call:
+                # todo 和 read_file 属于低风险重复调用，这里跳过中止检测
+                if block.name not in {"todo", "read_file"} and tool_call_sig == last_tool_call:
                     warning_msg = f"Warning: Duplicate tool call detected ({block.name}). Task may be stuck in a loop."
                     print(f"\033[33m[System] {warning_msg}\033[0m")
                     results.append({
