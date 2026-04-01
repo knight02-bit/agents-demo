@@ -246,7 +246,7 @@ PARENT_TOOLS = CHILD_TOOLS + [
         "input_schema": {
             "type": "object",
             "properties": {
-                "task": { 
+                "prompt": { 
                     "type": "string",
                     "description": "Short description of the task"
                 }
@@ -257,26 +257,47 @@ PARENT_TOOLS = CHILD_TOOLS + [
 ]
 
 
+@observe(name="run_subagent")
 def run_subagent(prompt: str) -> str:
     sub_messages = [{"role": "user", "content": prompt}]  # 干净的上下文，只包含用户提示
-    for _ in range(30):
-        response = client.messages.create(
-            model=MODEL, system=SUBAGENT_SYSTEM, messages=sub_messages,
-            tools=CHILD_TOOLS, max_tokens=8000,
-        )
-        
+    final_text = "(no summary)"
+    for loop_idx in range(30):
+        with langfuse.start_as_current_observation(
+            name=f"subagent-llm-loop-{loop_idx + 1}",
+            as_type="generation",
+            model=MODEL,
+            input=sub_messages
+        ) as generation:
+            response = client.messages.create(
+                model=MODEL, system=SUBAGENT_SYSTEM, messages=sub_messages,
+                tools=CHILD_TOOLS, max_tokens=8000,
+            )
+            final_text = "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+            update_payload = {"output": final_text}
+            if hasattr(response, "usage") and response.usage:
+                update_payload["usage"] = {
+                    "input": response.usage.input_tokens,
+                    "output": response.usage.output_tokens
+                }
+            generation.update(**update_payload)
+
         sub_messages.append({"role": "assistant", "content": response.content})
         if response.stop_reason != "tool_use":
             break
         results = []
         for block in response.content:
             if block.type == "tool_use":
-                handler = TOOL_HANDLERS.get(block.name)
-                output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                with langfuse.start_as_current_observation(
+                    name=f"subagent-tool-{block.name}",
+                    as_type="span",
+                    input=block.input
+                ) as tool_span:
+                    handler = TOOL_HANDLERS.get(block.name)
+                    output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
+                    tool_span.update(output=str(output)[:50000])
                 results.append({"type": "tool_result", "tool_use_id": block.id, "content": str(output)[:50000]})
         sub_messages.append({"role": "user", "content": results})
-    # 对子代理最终产物做裁剪，只把摘要给父代理
-    return "".join(b.text for b in response.content if hasattr(b, "text")) or "(no summary)"
+    return final_text
 
 
 @observe()
@@ -308,25 +329,22 @@ def agent_loop(messages: list):
                 model=MODEL, system=SYSTEM, messages=messages,
                 tools=PARENT_TOOLS, max_tokens=5000
             ) as stream:
-                # 遍历 text_stream，实现打字机效果的实时输出
-                # end="" 防止了每次打印都换行
-                # flush=True 会强制 Python 绕过系统缓冲区，立刻把接收到的字符推送到终端屏幕上
                 for text in stream.text_stream:
                     print(text, end="", flush=True)
 
                 print()
                 # 阻塞等待，直到获取完整的 Message 对象
                 response = stream.get_final_message()
+                response_text = "".join(b.text for b in response.content if hasattr(b, "text")) or ""
                 print(f"Token 消耗: {response.usage}")
 
-        # 🌟 将当前请求的 Token 消耗和输出更新给当前的 Generation
-        if hasattr(response, 'usage') and response.usage:
-            generation.update(
-                usage={
-                    "input": response.usage.input_tokens,
-                    "output": response.usage.output_tokens
-                }
-            )
+                update_payload = {"output": response_text}
+                if hasattr(response, 'usage') and response.usage:
+                    update_payload["usage"] = {
+                        "input": response.usage.input_tokens,
+                        "output": response.usage.output_tokens
+                    }
+                generation.update(**update_payload)
 
         messages.append({"role": "assistant", "content": response.content}) # 把大模型的回复添加到上下文
         # 如果不是工具调用，直接返回
@@ -370,12 +388,12 @@ def agent_loop(messages: list):
                     output = handler(**block.input) if handler else f"Unknown tool: {block.name}"
 
                 # 记录工具调用结果到 Langfuse
-                generation.update(
+                with langfuse.start_as_current_observation(
                     name=f"tool-call-{block.name}",
-                    as_type="tool",
-                    input=block.input,
-                    output=output
-                )
+                    as_type="span",
+                    input=block.input
+                ) as tool_span:
+                    tool_span.update(output=str(output)[:50000])
                 
                 display_out = output[:200].replace('\n', ' ') + "..." if len(output) > 200 else output
                 print(f"\033[90m[Tool] {block.name}: {display_out}\033[0m")
