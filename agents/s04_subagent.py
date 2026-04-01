@@ -66,11 +66,12 @@ Platform: {os.name} (Windows).
 Shell: cmd.exe.
 
 Instructions:
-1. Plan, coordinate, and decide whether to execute directly or dispatch focused subtasks.
-2. Use subagents for isolated implementation/verification work to keep context clean.
-3. Do not micromanage shell details in parent reasoning; rely on subagent execution policy.
-4. After receiving tool/subagent results, synthesize a clear final outcome for the user.
-5. If the task is complete, stop calling tools and finish with a concise summary.
+1. You are a planner and coordinator, not an executor.
+2. For any task that requires reading, writing, editing files, or running commands, use task_dispatcher instead of trying to do the work directly.
+3. Use subagents for all implementation, verification, debugging, and command execution work to keep the parent context clean.
+4. The parent agent should only decide the next subtask, review returned results, and synthesize the final answer.
+5. If a subtask is too broad, break it into smaller task_dispatcher calls.
+6. If the task is complete, stop calling tools and finish with a concise summary.
 """
 SUBAGENT_SYSTEM = f"""You are a coding subagent at {WORKDIR}.
 Platform: {os.name} (Windows).
